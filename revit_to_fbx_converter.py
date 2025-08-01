@@ -94,6 +94,8 @@ def upload_file_via_signed_s3(file_path, object_name, auth_headers):
     # 返回符合 APS 规范的 base64-URN
     object_urn_raw = f"urn:adsk.objects:os.object:{BUCKET_KEY}/{object_name}"
     base64_urn = base64.urlsafe_b64encode(object_urn_raw.encode()).decode().rstrip("=")
+    print(f"生成的URN: {object_urn_raw}")
+    print(f"Base64编码的URN: {base64_urn}")
     return base64_urn
 
 # --------------------------------------------------------------------------- #
@@ -101,6 +103,9 @@ def upload_file_via_signed_s3(file_path, object_name, auth_headers):
 # --------------------------------------------------------------------------- #
 def submit_fbx_job(base64_urn, root_filename, auth_headers):
     print("正在发起 FBX 转换任务...")
+    print(f"URN: {base64_urn}")
+    print(f"文件名: {root_filename}")
+    
     job_url = f"{MD_URL}/designdata/job"
     job_payload = {
         "input": {
@@ -108,10 +113,6 @@ def submit_fbx_job(base64_urn, root_filename, auth_headers):
         },
         "output": {
             "formats": [
-                # { # 如仅需 FBX 可删除此 SVF 块
-                #     "type": "svf",
-                #     "views": ["2d", "3d"]
-                # },
                 {
                     "type": "fbx",
                     "advanced": {
@@ -122,14 +123,41 @@ def submit_fbx_job(base64_urn, root_filename, auth_headers):
             ]
         }
     }
+    
+    print(f"请求URL: {job_url}")
+    print(f"请求载荷: {json.dumps(job_payload, indent=2)}")
+    
     try:
         r = requests.post(job_url, headers={**auth_headers, "Content-Type": "application/json"},
-                         json=job_payload)
-        r.raise_for_status()
-        print("转换任务已成功提交。")
+                         json=job_payload, timeout=30)
+        
+        print(f"响应状态码: {r.status_code}")
+        print(f"响应头: {dict(r.headers)}")
+        
+        if r.status_code == 200:
+            print("✅ 转换任务已成功提交。")
+            return r.json()
+        else:
+            print(f"❌ 转换任务提交失败")
+            print(f"响应内容: {r.text}")
+            r.raise_for_status()
+            
     except requests.exceptions.HTTPError as e:
-        print("提交 Job failure，服务端返回：")
-        print(r.text)  # 让 APS 的错误码和描述都打印出来
+        print(f"HTTP错误: {e}")
+        print(f"响应内容: {r.text if 'r' in locals() else 'N/A'}")
+        
+        # 分析常见错误
+        if "Failed to trigger translation" in r.text:
+            print("\n🔍 错误分析: 文件格式可能不被支持")
+            print("可能的解决方案:")
+            print("1. 确保文件是有效的Revit文件")
+            print("2. 检查文件是否损坏")
+            print("3. 尝试使用不同版本的Revit文件")
+            print("4. 确认APS应用有转换权限")
+        
+        raise
+    except Exception as e:
+        print(f"其他错误: {e}")
         raise
 
 # --------------------------------------------------------------------------- #
@@ -182,20 +210,34 @@ def main(rvt_path):
         print(f"错误：文件 '{rvt_path}' 不存在。")
         sys.exit(1)
 
+    # 检查文件扩展名
+    file_ext = os.path.splitext(rvt_path)[1].lower()
+    if file_ext not in ['.rvt', '.rfa', '.rte']:
+        print(f"警告：文件扩展名 '{file_ext}' 可能不是标准的Revit文件格式。")
+        print("支持的格式：.rvt (Revit项目), .rfa (Revit族), .rte (Revit模板)")
+
     access_token = get_token()
     auth_headers = {"Authorization": f"Bearer {access_token}"}
     object_name = os.path.basename(rvt_path)
 
     ensure_bucket(auth_headers)
-    base64_urn = upload_file_via_signed_s3(rvt_path, object_name, auth_headers)  # <<< 修改：返回正确 URN
-    submit_fbx_job(base64_urn, object_name, auth_headers)
-    manifest = wait_for_job(base64_urn, auth_headers)
-    if manifest["status"] == "success":
-        download_fbx(manifest, base64_urn, object_name, auth_headers)
-        print("流程完成！")
-    else:
-        print(json.dumps(manifest, indent=2))
-        print("转换失败，请检查上方错误信息。")
+    base64_urn = upload_file_via_signed_s3(rvt_path, object_name, auth_headers)
+    
+    try:
+        submit_fbx_job(base64_urn, object_name, auth_headers)
+        manifest = wait_for_job(base64_urn, auth_headers)
+        if manifest["status"] == "success":
+            download_fbx(manifest, base64_urn, object_name, auth_headers)
+            print("流程完成！")
+        else:
+            print(json.dumps(manifest, indent=2))
+            print("转换失败，请检查上方错误信息。")
+    except Exception as e:
+        print(f"转换过程中发生错误: {e}")
+        print("请检查：")
+        print("1. 文件是否为有效的Revit文件")
+        print("2. APS凭证是否有足够的权限")
+        print("3. 网络连接是否正常")
 
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":
